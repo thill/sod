@@ -1,14 +1,15 @@
-/// SOD: Service-Oriented Design
-///
-/// This crate provides `Service`, `MutService`, and `AsyncService` traits and associated utilities to facilitiate [service-oriented design](https://en.wikipedia.org/wiki/Service-orientation_design_principles).
-/// These traits and tools in this library provide concrete guidelines to help make a service-oriented design successful.
-///
-/// In the context of this crate, a service is simply a trait that accepts an input and produces a result.
-/// Traits can be composed or chained together using the `ServiceChain` found in this crate.
-///
-/// This crate in and of itself does not provide mechanisms to expose services on a network or facilitiate service discovery.
-/// Those implementation details are to be provided in `sod-*` crates, which will often simply encapsulate other open source libraries to expose them as services.
-/// Instead, this crate provides the core mechanisms to define services and in a way that helps guarantee they will be interoperable with one another at a library level.
+//! SOD: Service-Oriented Design
+//!
+//! This crate provides `Service`, `MutService`, and `AsyncService` traits and associated utilities to facilitiate [service-oriented design](https://en.wikipedia.org/wiki/Service-orientation_design_principles).
+//! These traits and tools in this library provide concrete guidelines to help make a service-oriented design successful.
+//!
+//! In the context of this crate, a service is simply a trait that accepts an input and produces a result.
+//! Traits can be composed or chained together using the `ServiceChain` found in this crate.
+//!
+//! This crate in and of itself does not provide mechanisms to expose services on a network or facilitiate service discovery.
+//! Those implementation details are to be provided in `sod-*` crates, which will often simply encapsulate other open source libraries to expose them as services.
+//! Instead, this crate provides the core mechanisms to define services in a way that helps guarantee they will be interoperable with one another at a library level.
+
 use async_trait::async_trait;
 use std::{
     cell::RefCell,
