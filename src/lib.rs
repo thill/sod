@@ -19,6 +19,8 @@ use std::{
     sync::{Arc, Mutex},
 };
 
+pub mod idle;
+
 /// A sync service trait
 ///
 /// Accepts `&self` and an input, which produces a `Result<Self::Output, Self::Error>`
@@ -120,7 +122,7 @@ impl<I, S: Service<I>> IntoMutService<I, ServiceMut<I, S>> for S {
         ServiceMut::new(self)
     }
 }
-impl<I, E, S: MutService<I, Error = E>> IntoMutService<I, S> for S {
+impl<I, S: MutService<I>> IntoMutService<I, S> for S {
     fn into_mut(self) -> S {
         self
     }
@@ -522,6 +524,152 @@ impl<'a, I: Send + 'a, S: AsyncService<I>> Service<I> for BlockingService<'a, I,
     type Error = S::Error;
     fn process(&self, input: I) -> Result<Self::Output, Self::Error> {
         futures::executor::block_on(self.service.process(input))
+    }
+}
+
+/// A [`Service`], which encapsulates a `Service<(), Output = Option<T>>`, blocking with the given idle function until a value is returned or the idle function returns an error.
+///
+/// When the underlying `Service<()>` returns None, the given idle function will be called.
+/// The idle function will be called repeatedly, given the attempt number as input, until Some(T) is returned by the underlying service.
+/// The idle function may return `Err(RetryError::Interrupted)` to return an error and avoid blocking forever.
+///
+/// See the [`idle`] module for some provided idle functions.
+pub struct PollService<O, E, S, F>
+where
+    E: Debug,
+    S: Service<(), Output = Option<O>, Error = E>,
+    F: Fn(usize) -> Result<(), RetryError<E>>,
+{
+    service: S,
+    idle: F,
+    _phantom: PhantomData<fn(E)>,
+}
+impl<O, E, S, F> PollService<O, E, S, F>
+where
+    E: Debug,
+    S: Service<(), Output = Option<O>, Error = E>,
+    F: Fn(usize) -> Result<(), RetryError<E>>,
+{
+    pub fn new(service: S, idle: F) -> Self {
+        Self {
+            service,
+            idle,
+            _phantom: PhantomData,
+        }
+    }
+}
+impl<O, E, S, F> Service<()> for PollService<O, E, S, F>
+where
+    E: Debug,
+    S: Service<(), Output = Option<O>, Error = E>,
+    F: Fn(usize) -> Result<(), RetryError<E>>,
+{
+    type Output = O;
+    type Error = RetryError<S::Error>;
+    fn process(&self, _: ()) -> Result<Self::Output, Self::Error> {
+        let mut attempt = 0;
+        loop {
+            match self.service.process(()) {
+                Ok(Some(v)) => return Ok(v),
+                Ok(None) => {
+                    if let Err(err) = (self.idle)(attempt) {
+                        return Err(err);
+                    }
+                }
+                Err(err) => return Err(RetryError::ServiceError(err)),
+            }
+            attempt += 1;
+        }
+    }
+}
+
+/// To be implemented by non-blocking services which may return the moved input in a resulting `Err` to be retried.
+///
+/// This allows a [`RetryService`] to wrap a `RetryableService`.
+pub trait RetryableService<I, E>: Service<I, Error = E> {
+    fn parse_retry(&self, err: E) -> Result<I, RetryError<E>>;
+}
+
+/// A [`Service`], which encapsulates a [`RetryableService`], blocking and retrying until a value is returned, an un-retryable error is encountered, or the idle function returns an `Err`.
+///
+/// When the underlying service's `Service::process` function returns an Err, it is passed to the given `RetryableService`, which must return an `Ok(Input)` to retry or an `Err` to return immediately.
+/// Between retries, the given `idle` function is called, given the attempt number as input, until `Ok(Output)` is returned by the underlying `Service` or `Err` is returned by the `RetryableService` or `idle` function.
+///
+/// See the [`idle`] module for some provided idle functions.
+pub struct RetryService<I, E, S, F>
+where
+    S: RetryableService<I, E>,
+    F: Fn(usize) -> Result<(), RetryError<E>>,
+{
+    service: S,
+    idle: F,
+    _phantom: PhantomData<fn(I, E)>,
+}
+impl<I, E, S, F> RetryService<I, E, S, F>
+where
+    S: RetryableService<I, E>,
+    F: Fn(usize) -> Result<(), RetryError<E>>,
+{
+    pub fn new(service: S, idle: F) -> Self {
+        Self {
+            service,
+            idle,
+            _phantom: PhantomData,
+        }
+    }
+}
+impl<I, E, S, F> Service<I> for RetryService<I, E, S, F>
+where
+    S: RetryableService<I, E>,
+    F: Fn(usize) -> Result<(), RetryError<E>>,
+{
+    type Output = S::Output;
+    type Error = RetryError<S::Error>;
+    fn process(&self, input: I) -> Result<Self::Output, Self::Error> {
+        let mut input = input;
+        let mut attempt = 0;
+        loop {
+            match self.service.process(input) {
+                Ok(v) => return Ok(v),
+                Err(err) => match (self.idle)(attempt) {
+                    Ok(()) => match self.service.parse_retry(err) {
+                        Ok(v) => input = v,
+                        Err(err) => return Err(err),
+                    },
+                    Err(err) => return Err(err),
+                },
+            }
+            attempt += 1;
+        }
+    }
+}
+
+/// Used by idle and retry services to interrupt a poll or retry loop
+#[derive(Clone)]
+pub enum RetryError<E> {
+    Interrupted,
+    ServiceError(E),
+}
+impl<E: PartialEq> PartialEq for RetryError<E> {
+    fn eq(&self, other: &Self) -> bool {
+        match self {
+            Self::Interrupted => match other {
+                Self::Interrupted => true,
+                Self::ServiceError(_) => false,
+            },
+            Self::ServiceError(err) => match other {
+                Self::Interrupted => false,
+                Self::ServiceError(other_err) => err == other_err,
+            },
+        }
+    }
+}
+impl<E: Debug> Debug for RetryError<E> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Interrupted => f.write_str("Interrupted"),
+            Self::ServiceError(e) => write!(f, "{e:?}"),
+        }
     }
 }
 

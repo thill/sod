@@ -1,6 +1,6 @@
 [package]
 name = "sod"
-version = "0.1.1"
+version = "0.1.2"
 edition = "2021"
 license = "MIT OR Apache-2.0"
 authors = ["Eric Thill"]
@@ -10,8 +10,9 @@ keywords = ["service", "pattern"]
 categories = ["rust-patterns"]
 exclude = ["Cargo.lock"]
 
-# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
-
 [dependencies]
 async-trait = "0.1.64"
 futures = "0.3.26"
+
+[dev-dependencies]
+ctrlc = "3.2.5"
