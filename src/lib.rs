@@ -12,6 +12,7 @@
 
 use async_trait::async_trait;
 use std::{
+    borrow::Borrow,
     cell::RefCell,
     error::Error,
     fmt::{Debug, Display},
@@ -669,6 +670,77 @@ impl<E: Debug> Debug for RetryError<E> {
         match self {
             Self::Interrupted => f.write_str("Interrupted"),
             Self::ServiceError(e) => write!(f, "{e:?}"),
+        }
+    }
+}
+
+/// Clone a [`Borrow<T>`] input, producing the cloned `T` value as output
+pub struct CloneService<T: Clone, B: Borrow<T>> {
+    _phantom: PhantomData<fn(T, B)>,
+}
+impl<T: Clone, B: Borrow<T>> CloneService<T, B> {
+    pub fn new() -> Self {
+        Self {
+            _phantom: PhantomData,
+        }
+    }
+}
+impl<T: Clone, B: Borrow<T>> Service<B> for CloneService<T, B> {
+    type Output = T;
+    type Error = ();
+    fn process(&self, input: B) -> Result<Self::Output, Self::Error> {
+        Ok(input.borrow().clone())
+    }
+}
+
+/// Iterate over [`Vec<T>`] input, passing each `T` to an underlying [`Service<T>`], returning `Vec<Output>`.
+pub struct IntoIterService<T, S: Service<T>> {
+    service: S,
+    _phantom: PhantomData<fn(T)>,
+}
+impl<T, S: Service<T>> IntoIterService<T, S> {
+    pub fn new(service: S) -> Self {
+        Self {
+            service,
+            _phantom: PhantomData,
+        }
+    }
+}
+impl<T, S: Service<T>> Service<Vec<T>> for IntoIterService<T, S> {
+    type Output = Vec<S::Output>;
+    type Error = S::Error;
+    fn process(&self, input: Vec<T>) -> Result<Self::Output, Self::Error> {
+        let mut output = Vec::with_capacity(input.len());
+        for e in input.into_iter() {
+            output.push(self.service.process(e)?);
+        }
+        Ok(output)
+    }
+}
+
+/// A [`Service<Option<T>>`] that encapsulates a `S: Service<T>`], producing `Option<S::Output>` as output.
+///
+/// When `None` is passed as input, `None` will be produced as output.
+/// When `Some(T)` is passed as input, `Some(S::Output)` will be produced as output.
+pub struct MaybeUnwrapService<T, S: Service<T>> {
+    service: S,
+    _phantom: PhantomData<fn(T)>,
+}
+impl<T, S: Service<T>> MaybeUnwrapService<T, S> {
+    pub fn new(service: S) -> Self {
+        Self {
+            service,
+            _phantom: PhantomData,
+        }
+    }
+}
+impl<T, S: Service<T>> Service<Option<T>> for MaybeUnwrapService<T, S> {
+    type Output = Option<S::Output>;
+    type Error = S::Error;
+    fn process(&self, input: Option<T>) -> Result<Self::Output, Self::Error> {
+        match input {
+            None => Ok(None),
+            Some(input) => Ok(Some(self.service.process(input)?)),
         }
     }
 }
