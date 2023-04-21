@@ -325,19 +325,17 @@ impl<I, S: Service<I>> Service<I> for RefCellService<I, S> {
 /// A [`Service`], which encapsulates a [`MutService`], using [`std::sync::Mutex`] to aquire mutability in each call to `process`.
 ///
 /// This service both `Send` and `Sync`.
-pub struct MutexService<I, S: Service<I>> {
+pub struct MutexService<S> {
     service: Mutex<S>,
-    _phantom: PhantomData<fn(I)>,
 }
-impl<I, S: Service<I>> MutexService<I, S> {
+impl<S> MutexService<S> {
     pub fn new(service: S) -> Self {
         Self {
             service: Mutex::new(service),
-            _phantom: PhantomData,
         }
     }
 }
-impl<I, S: Service<I>> Service<I> for MutexService<I, S> {
+impl<I, S: MutService<I>> Service<I> for MutexService<S> {
     type Output = S::Output;
     type Error = S::Error;
     fn process(&self, input: I) -> Result<Self::Output, Self::Error> {
