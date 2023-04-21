@@ -18,9 +18,11 @@ use std::{
     fmt::{Debug, Display},
     marker::PhantomData,
     sync::{Arc, Mutex},
+    thread::{spawn, JoinHandle},
 };
 
 pub mod idle;
+pub mod thread;
 
 /// A sync service trait
 ///
@@ -535,7 +537,6 @@ impl<'a, I: Send + 'a, S: AsyncService<I>> Service<I> for BlockingService<'a, I,
 /// See the [`idle`] module for some provided idle functions.
 pub struct PollService<E, S, F>
 where
-    E: Debug,
     F: Fn(usize) -> Result<(), RetryError<E>>,
 {
     service: S,
@@ -544,7 +545,6 @@ where
 }
 impl<E, S, F> PollService<E, S, F>
 where
-    E: Debug,
     F: Fn(usize) -> Result<(), RetryError<E>>,
 {
     pub fn new(service: S, idle: F) -> Self {
@@ -557,7 +557,6 @@ where
 }
 impl<O, E, S, F> Service<()> for PollService<E, S, F>
 where
-    E: Debug,
     S: Service<(), Output = Option<O>, Error = E>,
     F: Fn(usize) -> Result<(), RetryError<E>>,
 {
@@ -581,7 +580,6 @@ where
 }
 impl<O, E, S, F> MutService<()> for PollService<E, S, F>
 where
-    E: Debug,
     S: MutService<(), Output = Option<O>, Error = E>,
     F: Fn(usize) -> Result<(), RetryError<E>>,
 {
@@ -606,7 +604,6 @@ where
 #[async_trait]
 impl<O, E, S, F> AsyncService<()> for PollService<E, S, F>
 where
-    E: Debug,
     S: AsyncService<(), Output = Option<O>, Error = E> + Send + Sync,
     F: Fn(usize) -> Result<(), RetryError<E>> + Send + Sync,
 {
@@ -636,7 +633,7 @@ pub trait Retryable<I, E> {
     fn parse_retry(&self, err: E) -> Result<I, RetryError<E>>;
 }
 
-/// A [`Service`], [`MutService`], or [`AsyncService`], which encapsulates a [`Retryable`] [`Service`], [`MutService`], or [`AsyncService`], blocking and retrying until a value is returned, an un-retryable error is encountered, or the idle function returns an `Err`.
+/// A [`Service`], [`MutService`], or [`AsyncService`], which encapsulates a [`Retryable`], blocking and retrying until a value is returned, an un-retryable error is encountered, or the idle function returns an `Err`.
 ///
 /// When the underlying service's `Service::process` function returns an Err, it is passed to the given `Retryable`, which must return an `Ok(Input)` to retry or an `Err` to return immediately.
 /// Between retries, the given `idle` function is called, given the attempt number as input, until `Ok(Output)` is returned by the underlying `Service` or `Err` is returned by the `Retryable` or `idle` function.
@@ -740,6 +737,38 @@ where
     }
 }
 
+/// A [`Service`], which encapsulates a [`Retryable`], producing `None` when a retryable event is encounterd.
+///
+/// This may be used to drive non-blocking duty-cycles in a service chain, continuously passing None through the service chain when no input is available.
+pub struct RetryToOptionService<I, E, S> {
+    service: S,
+    _phantom: PhantomData<fn(I, E)>,
+}
+impl<I, E, S> RetryToOptionService<I, E, S> {
+    pub fn new(service: S) -> Self {
+        Self {
+            service,
+            _phantom: PhantomData,
+        }
+    }
+}
+impl<I, E, S> Service<I> for RetryToOptionService<I, E, S>
+where
+    S: Service<I, Error = E> + Retryable<I, E>,
+{
+    type Output = Option<S::Output>;
+    type Error = RetryError<S::Error>;
+    fn process(&self, input: I) -> Result<Self::Output, Self::Error> {
+        match self.service.process(input) {
+            Ok(v) => Ok(Some(v)),
+            Err(err) => match self.service.parse_retry(err) {
+                Ok(_) => Ok(None),
+                Err(err) => Err(err),
+            },
+        }
+    }
+}
+
 /// Used by idle and retry services to interrupt a poll or retry loop
 #[derive(Clone)]
 pub enum RetryError<E> {
@@ -839,6 +868,51 @@ impl<T, S: Service<T>> Service<Option<T>> for MaybeUnwrapService<T, S> {
         }
     }
 }
+
+/// A [`Service`] that accepts a `FnOnce()` as input, which is passed to [`spawn()`], and produces a [`JoinHandle`] as output.
+pub struct SpawnService {}
+impl SpawnService {
+    pub fn new() -> Self {
+        Self {}
+    }
+}
+impl<T: Send + 'static, F: FnOnce() -> T + Send + 'static> Service<F> for SpawnService {
+    type Output = JoinHandle<T>;
+    type Error = ();
+    fn process(&self, input: F) -> Result<Self::Output, Self::Error> {
+        Ok(spawn(input))
+    }
+}
+
+/// A [`Service`] that will return `Ok(Input)` when the provided function returns true, or  or `Err(Stopped)` when the provided function returns false.
+pub struct StopService<KeepRunningFunc: Fn() -> bool> {
+    f: KeepRunningFunc,
+}
+impl<KeepRunningFunc: Fn() -> bool> StopService<KeepRunningFunc> {
+    pub fn new(f: KeepRunningFunc) -> Self {
+        Self { f }
+    }
+}
+impl<I, KeepRunningFunc: Fn() -> bool> Service<I> for StopService<KeepRunningFunc> {
+    type Output = I;
+    type Error = Stopped;
+    fn process(&self, input: I) -> Result<Self::Output, Self::Error> {
+        match (self.f)() {
+            true => Ok(input),
+            false => Err(Stopped),
+        }
+    }
+}
+
+/// A generic error that indicates stoppage
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Stopped;
+impl Display for Stopped {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("Stopped")
+    }
+}
+impl Error for Stopped {}
 
 /// A chain of [`Service`], [`MutService`], or [`AsyncService`] implementations, which is itself a single [`Service`], [`MutService`], or [`AsyncService`] that accepts the first service in the chain's input and produces the the last service in the chain's output.
 /// When any service in the chain returns an `Err`, the chain will break early, encapsulate the error in a `ServiceChainError`, and return `Err(ServiceChainError)` immediately.
