@@ -10,7 +10,6 @@
 //! Those implementation details are to be provided in `sod-*` crates, which will often simply encapsulate other open source libraries to expose them as services.
 //! Instead, this crate provides the core mechanisms to define services in a way that helps guarantee they will be interoperable with one another at a library level.
 
-use async_trait::async_trait;
 use std::{
     borrow::Borrow,
     cell::RefCell,
@@ -20,6 +19,11 @@ use std::{
     sync::{Arc, Mutex},
     thread::{spawn, JoinHandle},
 };
+
+/// Provide support for `async fn` by exposing the external `async_trait` crate.
+/// See [`async_trait`](mod@async_trait) for details.
+#[doc(inline)]
+pub use async_trait::async_trait;
 
 pub mod idle;
 pub mod thread;
