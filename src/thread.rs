@@ -9,7 +9,7 @@ use crate::{MutService, Service};
 /// * `error_handler` - a function to handle errors, the result of which will determine if the thread should exit or keep running.
 pub fn spawn_loop<S, F>(service: S, error_handler: F) -> JoinHandle<()>
 where
-    S: Service<()> + Send + 'static,
+    S: Service<Input = ()> + Send + 'static,
     F: Fn(S::Error) -> Result<(), S::Error> + Send + 'static,
 {
     spawn(move || loop {
@@ -28,7 +28,7 @@ where
 /// * `error_handler` - a function to handle errors, the result of which will determine if the thread should exit or keep running.
 pub fn spawn_loop_mut<S, F>(mut service: S, error_handler: F) -> JoinHandle<()>
 where
-    S: MutService<()> + Send + 'static,
+    S: MutService<Input = ()> + Send + 'static,
     F: Fn(S::Error) -> Result<(), S::Error> + Send + 'static,
 {
     spawn(move || loop {

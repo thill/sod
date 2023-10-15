@@ -13,6 +13,7 @@
 use std::{
     borrow::Borrow,
     cell::RefCell,
+    convert::Infallible,
     error::Error,
     fmt::{Debug, Display},
     marker::PhantomData,
@@ -30,147 +31,141 @@ pub mod thread;
 
 /// A sync service trait
 ///
-/// Accepts `&self` and an input, which produces a `Result<Self::Output, Self::Error>`
-pub trait Service<I> {
+/// Accepts `&self` and an input, producing a `Result<Self::Output, Self::Error>`.
+///
+/// Conversion to [`MutService`] or [`AsyncService`]:
+/// * The `into_mut` function can be used to convert a [`Service`] into a [`ServiceMut`]
+/// * The `into_async` function can be used to convert a [`Service`] to a [`ServiceAsync`] when `Service::Input`, `Service::Output`, and `Service::Error` are [`Send`] and when [`Service`] is [`Send`] + [`Sync`]
+pub trait Service {
+    type Input;
     type Output;
     type Error;
-    fn process(&self, input: I) -> Result<Self::Output, Self::Error>;
+
+    /// Process an input, producing a `Result<Self::Output, Self::Error>`
+    fn process(&self, input: Self::Input) -> Result<Self::Output, Self::Error>;
+
+    /// Convert this [`Service`] into a [`ServiceMut`] which impls [`MutService`]
+    fn into_mut(self) -> ServiceMut<Self>
+    where
+        Self: Sized,
+    {
+        ServiceMut::from(self)
+    }
+
+    /// Convert this [`Service`] into a [`ServiceAsync`] which impls [`AsyncService`]
+    fn into_async(self) -> ServiceAsync<Self>
+    where
+        Self: Sized + Send + Sync + 'static,
+    {
+        ServiceAsync::from(self)
+    }
+
+    /// Convert this [`Service`] into a [`DynService`]
+    fn into_dyn<'a>(self) -> DynService<'a, Self::Input, Self::Output, Self::Error>
+    where
+        Self: Sized + 'static,
+    {
+        DynService::new(self)
+    }
 }
 
 /// A mut service trait
 ///
-/// Accepts `&mut self` and an input, which produces a `Result<Self::Output, Self::Error>`
-pub trait MutService<I> {
+/// Accepts `&mut self` and an input, producing a `Result<Self::Output, Self::Error>`
+pub trait MutService {
+    type Input;
     type Output;
     type Error;
-    fn process(&mut self, input: I) -> Result<Self::Output, Self::Error>;
+    fn process(&mut self, input: Self::Input) -> Result<Self::Output, Self::Error>;
+
+    /// Convert this [`Service`] into a [`DynMutService`]
+    fn into_dyn<'a>(self) -> DynMutService<'a, Self::Input, Self::Output, Self::Error>
+    where
+        Self: Sized + 'static,
+    {
+        DynMutService::new(self)
+    }
 }
 
 /// An async service trait
 ///
-/// Uses the [async_trait](https://docs.rs/async-trait/latest/async_trait/) to accept `&self` and an input asynchronously, which produces a `Result<Self::Output, Self::Error>`
+/// Uses the [async_trait](https://docs.rs/async-trait/latest/async_trait/) to accept `&self` and an input asynchronously, producing a `Result<Self::Output, Self::Error>`
 #[async_trait]
-pub trait AsyncService<I> {
-    type Output;
-    type Error;
-    async fn process(&self, input: I) -> Result<Self::Output, Self::Error>;
+pub trait AsyncService: Send + Sync {
+    type Input: Send + 'static;
+    type Output: Send + 'static;
+    type Error: Send + 'static;
+    async fn process(&self, input: Self::Input) -> Result<Self::Output, Self::Error>;
 }
 
 /// A [`MutService`] that encapsulates an underlying [`Service`], exposing it as `mut`.
-/// Any `Service` should be able to be represented as a `MutService` which simply does not mutate itself.
-pub struct ServiceMut<I, S> {
+pub struct ServiceMut<S: Service> {
     service: S,
-    _phantom: PhantomData<fn(I)>,
 }
-
-impl<I, S: Service<I>> ServiceMut<I, S> {
+impl<'a, S: Service> ServiceMut<S> {
     pub fn new(service: S) -> Self {
-        Self {
-            service,
-            _phantom: PhantomData,
-        }
+        Self { service }
     }
 }
-impl<I, S: Service<I>> MutService<I> for ServiceMut<I, S> {
+#[async_trait]
+impl<'a, S: Service> MutService for ServiceMut<S> {
+    type Input = S::Input;
     type Output = S::Output;
     type Error = S::Error;
-    fn process(&mut self, input: I) -> Result<Self::Output, Self::Error> {
+    fn process(&mut self, input: Self::Input) -> Result<Self::Output, Self::Error> {
         self.service.process(input)
     }
 }
-impl<I, S: Service<I>> From<S> for ServiceMut<I, S> {
+impl<'a, S: Service> From<S> for ServiceMut<S> {
     fn from(service: S) -> Self {
-        Self {
-            service,
-            _phantom: PhantomData,
-        }
+        Self { service }
     }
 }
 
 /// An [`AsyncService`] that encapsulates an underlying [`Service`], exposing it as `async`.
-/// Any `Service` should be able to be represented as an `AsyncService`, since any async code should be able to call any sync code.
-pub struct ServiceAsync<'a, I: Send + 'a, S: Service<I>> {
+pub struct ServiceAsync<S: Service> {
     service: S,
-    _phantom: PhantomData<fn(&'a I)>,
 }
-impl<'a, I: Send + 'a, S: Service<I> + Send + Sync> ServiceAsync<'a, I, S> {
+impl<'a, S: Service + Send + Sync> ServiceAsync<S> {
     pub fn new(service: S) -> Self {
-        Self {
-            service,
-            _phantom: PhantomData,
-        }
+        Self { service }
     }
 }
 #[async_trait]
-impl<'a, I: Send + 'a, S: Service<I> + Send + Sync> AsyncService<I> for ServiceAsync<'a, I, S> {
+impl<'a, S: Service + Send + Sync> AsyncService for ServiceAsync<S>
+where
+    S::Input: Send + 'static,
+    S::Output: Send + 'static,
+    S::Error: Send + 'static,
+{
+    type Input = S::Input;
     type Output = S::Output;
     type Error = S::Error;
-    async fn process(&self, input: I) -> Result<Self::Output, Self::Error> {
+    async fn process(&self, input: Self::Input) -> Result<Self::Output, Self::Error> {
         self.service.process(input)
     }
 }
-impl<'a, I: Send + 'a, S: Service<I> + Send + Sync> From<S> for ServiceAsync<'a, I, S> {
+impl<'a, S: Service + Send + Sync> From<S> for ServiceAsync<S> {
     fn from(service: S) -> Self {
-        Self {
-            service,
-            _phantom: PhantomData,
-        }
-    }
-}
-
-/// Used as a generic input to accept any [`Service`] or [`MutService`] as a [`MutService`].
-///
-/// This is used by `ServiceChain::start_mut(MutService)` to accept either a [`Service`] or [`MutService`].
-pub trait IntoMutService<I, S: MutService<I>> {
-    fn into_mut(self) -> S;
-}
-impl<I, S: Service<I>> IntoMutService<I, ServiceMut<I, S>> for S {
-    fn into_mut(self) -> ServiceMut<I, S> {
-        ServiceMut::new(self)
-    }
-}
-impl<I, S: MutService<I>> IntoMutService<I, S> for S {
-    fn into_mut(self) -> S {
-        self
-    }
-}
-
-/// Used as a generic input to accept any [`Service`] or [`AsyncService`] as an [`AsyncService`].
-///
-/// This is used by `ServiceChain::start_async(AsyncService)` to accept either a [`Service`] or [`AsyncService`].
-pub trait IntoAsyncService<I, S: AsyncService<I>> {
-    fn into_async(self) -> S;
-}
-impl<'a, I: Send + 'a, S: Service<I> + Send + Sync> IntoAsyncService<I, ServiceAsync<'a, I, S>>
-    for S
-where
-    <S as Service<I>>::Output: Send,
-    <S as Service<I>>::Error: Send,
-{
-    fn into_async(self) -> ServiceAsync<'a, I, S> {
-        ServiceAsync::new(self)
-    }
-}
-impl<I, S: AsyncService<I>> IntoAsyncService<I, S> for S {
-    fn into_async(self) -> S {
-        self
+        Self { service }
     }
 }
 
 /// A [`Service`] which encapsulates a `Box<dyn Service<...>>`.
 ///
-/// This is useful when you have a [`Service`] with a complicated compile-time type and which to pass it around with a simplified signature.
+/// This is useful when you have a [`Service`] with a complicated compile-time type that needs to be passed to a function with a simplified signature.
 pub struct DynService<'a, I, O, E> {
-    service: Box<dyn Service<I, Output = O, Error = E> + 'a>,
+    service: Box<dyn Service<Input = I, Output = O, Error = E> + 'a>,
 }
 impl<'a, I, O, E> DynService<'a, I, O, E> {
-    pub fn new<S: Service<I, Output = O, Error = E> + 'a>(service: S) -> Self {
+    pub fn new<S: Service<Input = I, Output = O, Error = E> + 'a>(service: S) -> Self {
         Self {
             service: Box::new(service),
         }
     }
 }
-impl<'a, I, O, E> Service<I> for DynService<'a, I, O, E> {
+impl<'a, I, O, E> Service for DynService<'a, I, O, E> {
+    type Input = I;
     type Output = O;
     type Error = E;
     fn process(&self, input: I) -> Result<Self::Output, Self::Error> {
@@ -182,16 +177,17 @@ impl<'a, I, O, E> Service<I> for DynService<'a, I, O, E> {
 ///
 /// This is useful when you have a [MutService] with a complicated compile-time type and which to pass it around with a simplified signature.
 pub struct DynMutService<'a, I, O, E> {
-    service: Box<dyn MutService<I, Output = O, Error = E> + 'a>,
+    service: Box<dyn MutService<Input = I, Output = O, Error = E> + 'a>,
 }
 impl<'a, I, O, E> DynMutService<'a, I, O, E> {
-    pub fn new<S: MutService<I, Output = O, Error = E> + 'a>(service: S) -> Self {
+    pub fn new<S: MutService<Input = I, Output = O, Error = E> + 'a>(service: S) -> Self {
         Self {
             service: Box::new(service),
         }
     }
 }
-impl<'a, I, O, E> MutService<I> for DynMutService<'a, I, O, E> {
+impl<'a, I, O, E> MutService for DynMutService<'a, I, O, E> {
+    type Input = I;
     type Output = O;
     type Error = E;
     fn process(&mut self, input: I) -> Result<Self::Output, Self::Error> {
@@ -203,16 +199,22 @@ impl<'a, I, O, E> MutService<I> for DynMutService<'a, I, O, E> {
 ///
 /// This is useful when you have a [AsyncService] with a complicated compile-time type and which to pass it around with a simplified signature.
 pub struct DynAsyncService<'a, I, O, E> {
-    service: Box<dyn AsyncService<I, Output = O, Error = E> + 'a>,
+    service: Box<dyn AsyncService<Input = I, Output = O, Error = E> + 'a>,
 }
 impl<'a, I, O, E> DynAsyncService<'a, I, O, E> {
-    pub fn new<S: AsyncService<I, Output = O, Error = E> + 'a>(service: S) -> Self {
+    pub fn new<S: AsyncService<Input = I, Output = O, Error = E> + 'a>(service: S) -> Self {
         Self {
             service: Box::new(service),
         }
     }
 }
-impl<'a, I, O, E> AsyncService<I> for DynAsyncService<'a, I, O, E> {
+impl<'a, I, O, E> AsyncService for DynAsyncService<'a, I, O, E>
+where
+    I: Send + 'static,
+    O: Send + 'static,
+    E: Send + 'static,
+{
+    type Input = I;
     type Output = O;
     type Error = E;
     fn process<'b, 'async_trait>(
@@ -234,36 +236,38 @@ impl<'a, I, O, E> AsyncService<I> for DynAsyncService<'a, I, O, E> {
 }
 
 /// A [`Service`] which can accept any input that can be [`Into`]ed an ouput, always returning `Ok(output)`.
-pub struct IntoService<O> {
-    _phantom: PhantomData<fn(O)>,
+pub struct IntoService<O, I: Into<O>> {
+    _phantom: PhantomData<fn(O, I)>,
 }
-impl<O> IntoService<O> {
+impl<O, I: Into<O>> IntoService<O, I> {
     pub fn new() -> Self {
         Self {
             _phantom: PhantomData,
         }
     }
 }
-impl<O, I: Into<O>> Service<I> for IntoService<O> {
+impl<O, I: Into<O>> Service for IntoService<O, I> {
+    type Input = I;
     type Output = O;
-    type Error = ();
+    type Error = Infallible;
     fn process(&self, input: I) -> Result<Self::Output, Self::Error> {
         Ok(input.into())
     }
 }
 
 /// A [`Service`] which can accept any input that can be [`Into`]ed an ouput, returning `Result<Self::Output, TryInto::Error>`.
-pub struct TryIntoService<O> {
-    _phantom: PhantomData<fn(O)>,
+pub struct TryIntoService<O, I: TryInto<O>> {
+    _phantom: PhantomData<fn(O, I)>,
 }
-impl<O> TryIntoService<O> {
+impl<O, I: TryInto<O>> TryIntoService<O, I> {
     pub fn new() -> Self {
         Self {
             _phantom: PhantomData,
         }
     }
 }
-impl<O, E, I: TryInto<O, Error = E>> Service<I> for TryIntoService<O> {
+impl<O, E, I: TryInto<O, Error = E>> Service for TryIntoService<O, I> {
+    type Input = I;
     type Output = O;
     type Error = E;
     fn process(&self, input: I) -> Result<Self::Output, Self::Error> {
@@ -272,35 +276,38 @@ impl<O, E, I: TryInto<O, Error = E>> Service<I> for TryIntoService<O> {
 }
 
 /// A [`Service`] which no-ops, passing the input as `Ok(output)`.
-pub struct NoOpService<'a> {
-    _phantom: PhantomData<fn(&'a ())>,
+pub struct NoOpService<'a, T> {
+    _phantom: PhantomData<fn(&'a T)>,
 }
-impl<'a> NoOpService<'a> {
+impl<'a, T> NoOpService<'a, T> {
     pub fn new() -> Self {
         Self {
             _phantom: PhantomData,
         }
     }
 }
-impl<'a, T> Service<T> for NoOpService<'a> {
+impl<'a, T> Service for NoOpService<'a, T> {
+    type Input = T;
     type Output = T;
-    type Error = ();
-    fn process(&self, input: T) -> Result<T, ()> {
+    type Error = Infallible;
+    fn process(&self, input: T) -> Result<T, Infallible> {
         Ok(input)
     }
 }
-impl<'a, T> MutService<T> for NoOpService<'a> {
+impl<'a, T> MutService for NoOpService<'a, T> {
+    type Input = T;
     type Output = T;
-    type Error = ();
-    fn process(&mut self, input: T) -> Result<T, ()> {
+    type Error = Infallible;
+    fn process(&mut self, input: T) -> Result<T, Infallible> {
         Ok(input)
     }
 }
 #[async_trait]
-impl<'a, T: Send + 'a> AsyncService<T> for NoOpService<'a> {
+impl<'a, T: Send + 'static> AsyncService for NoOpService<'a, T> {
+    type Input = T;
     type Output = T;
-    type Error = ();
-    async fn process(&self, input: T) -> Result<T, ()> {
+    type Error = Infallible;
+    async fn process(&self, input: T) -> Result<T, Infallible> {
         Ok(input)
     }
 }
@@ -308,22 +315,21 @@ impl<'a, T: Send + 'a> AsyncService<T> for NoOpService<'a> {
 /// A [`Service`], which encapsulates a [`MutService`], using [`std::cell::RefCell`] to aquire mutability in each call to `process`.
 ///
 /// This service is never `Sync`, but may be `Send` if the underlying [`Service`] is `Send`.
-pub struct RefCellService<I, S: Service<I>> {
+pub struct RefCellService<S: Service> {
     service: RefCell<S>,
-    _phantom: PhantomData<fn(I)>,
 }
-impl<I, S: Service<I>> RefCellService<I, S> {
+impl<S: Service> RefCellService<S> {
     pub fn new(service: S) -> Self {
         Self {
             service: RefCell::new(service),
-            _phantom: PhantomData,
         }
     }
 }
-impl<I, S: Service<I>> Service<I> for RefCellService<I, S> {
+impl<S: Service> Service for RefCellService<S> {
+    type Input = S::Input;
     type Output = S::Output;
     type Error = S::Error;
-    fn process(&self, input: I) -> Result<Self::Output, Self::Error> {
+    fn process(&self, input: Self::Input) -> Result<Self::Output, Self::Error> {
         self.service.borrow_mut().process(input)
     }
 }
@@ -331,6 +337,8 @@ impl<I, S: Service<I>> Service<I> for RefCellService<I, S> {
 /// A [`Service`], which encapsulates a [`MutService`], using [`std::sync::Mutex`] to aquire mutability in each call to `process`.
 ///
 /// This service both `Send` and `Sync`.
+///
+/// The service will panic if the mutex returns a poison error.
 pub struct MutexService<S> {
     service: Mutex<S>,
 }
@@ -341,10 +349,11 @@ impl<S> MutexService<S> {
         }
     }
 }
-impl<I, S: MutService<I>> Service<I> for MutexService<S> {
+impl<S: MutService> Service for MutexService<S> {
+    type Input = S::Input;
     type Output = S::Output;
     type Error = S::Error;
-    fn process(&self, input: I) -> Result<Self::Output, Self::Error> {
+    fn process(&self, input: Self::Input) -> Result<Self::Output, Self::Error> {
         self.service.lock().expect("poisoned mutex").process(input)
     }
 }
@@ -353,23 +362,46 @@ impl<I, S: MutService<I>> Service<I> for MutexService<S> {
 ///
 /// This service can encapsulate a [`MutexService`], providing a `Send` + `Sync` service that can be cloned and referenced by multiple threads.
 #[derive(Clone)]
-pub struct ArcService<I, S: Service<I>> {
+pub struct ArcService<S: Service> {
     service: Arc<S>,
-    _phantom: PhantomData<fn(I)>,
 }
-impl<I, S: Service<I>> ArcService<I, S> {
+impl<S: Service> ArcService<S> {
     pub fn new(service: S) -> Self {
         Self {
             service: Arc::new(service),
-            _phantom: PhantomData,
         }
     }
 }
-impl<I, S: Service<I>> Service<I> for ArcService<I, S> {
+impl<S: Service> Service for ArcService<S> {
+    type Input = S::Input;
     type Output = S::Output;
     type Error = S::Error;
-    fn process(&self, input: I) -> Result<Self::Output, Self::Error> {
+    fn process(&self, input: Self::Input) -> Result<Self::Output, Self::Error> {
         self.service.process(input)
+    }
+}
+
+/// A [`Service`], which encapsulates an `Arc<Service<Input>>`.
+///
+/// This service can encapsulate a [`MutexService`], providing a `Send` + `Sync` service that can be cloned and referenced by multiple threads.
+#[derive(Clone)]
+pub struct ArcAsyncService<S: AsyncService> {
+    service: Arc<S>,
+}
+impl<S: AsyncService> ArcAsyncService<S> {
+    pub fn new(service: S) -> Self {
+        Self {
+            service: Arc::new(service),
+        }
+    }
+}
+#[async_trait]
+impl<S: AsyncService> AsyncService for ArcAsyncService<S> {
+    type Input = S::Input;
+    type Output = S::Output;
+    type Error = S::Error;
+    async fn process(&self, input: Self::Input) -> Result<Self::Output, Self::Error> {
+        self.service.process(input).await
     }
 }
 
@@ -386,7 +418,8 @@ impl<I, O, E, F: Fn(I) -> Result<O, E>> FnService<I, O, E, F> {
         }
     }
 }
-impl<I, O, E, F: Fn(I) -> Result<O, E>> Service<I> for FnService<I, O, E, F> {
+impl<I, O, E, F: Fn(I) -> Result<O, E>> Service for FnService<I, O, E, F> {
+    type Input = I;
     type Output = O;
     type Error = E;
     fn process(&self, input: I) -> Result<Self::Output, Self::Error> {
@@ -407,7 +440,8 @@ impl<I, O, E, F: FnMut(I) -> Result<O, E>> FnMutService<I, O, E, F> {
         }
     }
 }
-impl<I, O, E, F: Fn(I) -> Result<O, E>> MutService<I> for FnMutService<I, O, E, F> {
+impl<I, O, E, F: Fn(I) -> Result<O, E>> MutService for FnMutService<I, O, E, F> {
+    type Input = I;
     type Output = O;
     type Error = E;
     fn process(&mut self, input: I) -> Result<Self::Output, Self::Error> {
@@ -416,38 +450,39 @@ impl<I, O, E, F: Fn(I) -> Result<O, E>> MutService<I> for FnMutService<I, O, E, 
 }
 
 /// A [`Service`], [`MutService`], or [`AsyncService`] that encapsulates two service and accepts a [`Clone`]able input, which is passed to both underlying services, returning their outputs as a tuple.
-pub struct CloningForkService<I: Clone, S1, S2> {
+pub struct CloningForkService<S1, S2> {
     first: S1,
     second: S2,
-    _phantom: PhantomData<fn(I)>,
 }
-impl<I: Clone, S1, S2> CloningForkService<I, S1, S2> {
+impl<S1, S2> CloningForkService<S1, S2> {
     pub fn new(first: S1, second: S2) -> Self {
-        Self {
-            first,
-            second,
-            _phantom: PhantomData,
-        }
+        Self { first, second }
     }
 }
-impl<I: Clone, E, S1: Service<I, Error = E>, S2: Service<I, Error = E>> Service<I>
-    for CloningForkService<I, S1, S2>
+impl<S1: Service, S2: Service<Input = S1::Input, Error = S1::Error>> Service
+    for CloningForkService<S1, S2>
+where
+    S1::Input: Clone,
 {
+    type Input = S1::Input;
     type Output = (S1::Output, S2::Output);
-    type Error = E;
-    fn process(&self, input: I) -> Result<Self::Output, Self::Error> {
+    type Error = S1::Error;
+    fn process(&self, input: Self::Input) -> Result<Self::Output, Self::Error> {
         Ok((
             self.first.process(input.clone())?,
             self.second.process(input)?,
         ))
     }
 }
-impl<I: Clone, E, S1: MutService<I, Error = E>, S2: MutService<I, Error = E>> MutService<I>
-    for CloningForkService<I, S1, S2>
+impl<S1: MutService, S2: MutService<Input = S1::Input, Error = S1::Error>> MutService
+    for CloningForkService<S1, S2>
+where
+    S1::Input: Clone,
 {
+    type Input = S1::Input;
     type Output = (S1::Output, S2::Output);
-    type Error = E;
-    fn process(&mut self, input: I) -> Result<Self::Output, Self::Error> {
+    type Error = S1::Error;
+    fn process(&mut self, input: Self::Input) -> Result<Self::Output, Self::Error> {
         Ok((
             self.first.process(input.clone())?,
             self.second.process(input)?,
@@ -455,25 +490,19 @@ impl<I: Clone, E, S1: MutService<I, Error = E>, S2: MutService<I, Error = E>> Mu
     }
 }
 #[async_trait]
-impl<
-        'a,
-        I: Clone + Send + 'a,
-        E: Debug + Send + 'a,
-        S1: AsyncService<I, Error = E> + Send + Sync,
-        S2: AsyncService<I, Error = E> + Send + Sync,
-    > AsyncService<I> for CloningForkService<I, S1, S2>
+impl<S1: AsyncService, S2: AsyncService<Input = S1::Input, Error = S1::Error>> AsyncService
+    for CloningForkService<S1, S2>
 where
-    <S1 as AsyncService<I>>::Output: Send + 'a,
-    <S2 as AsyncService<I>>::Output: Send + 'a,
+    S1::Input: Clone + Sync,
 {
+    type Input = S1::Input;
     type Output = (S1::Output, S2::Output);
-    type Error = E;
-    async fn process(&self, input: I) -> Result<Self::Output, Self::Error> {
-        let fut1 = self.first.process(input.clone());
-        let fut2 = self.second.process(input);
-        let o1 = fut1.await?;
-        let o2 = fut2.await?;
-        Ok((o1, o2))
+    type Error = S1::Error;
+    async fn process(&self, input: Self::Input) -> Result<Self::Output, Self::Error> {
+        Ok((
+            self.first.process(input.clone()).await?,
+            self.second.process(input).await?,
+        ))
     }
 }
 
@@ -492,43 +521,34 @@ impl<I, S1, S2> RefForkService<I, S1, S2> {
         }
     }
 }
-impl<'a, I: 'a, E, S1: Service<&'a I, Error = E>, S2: Service<&'a I, Error = E>> Service<&'a I>
-    for RefForkService<I, S1, S2>
+impl<
+        'a,
+        I: 'a,
+        E,
+        S1: Service<Input = &'a I, Error = E>,
+        S2: Service<Input = &'a I, Error = E>,
+    > Service for RefForkService<I, S1, S2>
 {
+    type Input = &'a I;
     type Output = (S1::Output, S2::Output);
     type Error = E;
     fn process(&self, input: &'a I) -> Result<Self::Output, Self::Error> {
         Ok((self.first.process(input)?, self.second.process(input)?))
     }
 }
-impl<'a, I: 'a, E, S1: MutService<&'a I, Error = E>, S2: MutService<&'a I, Error = E>>
-    MutService<&'a I> for RefForkService<I, S1, S2>
+impl<
+        'a,
+        I: 'a,
+        E,
+        S1: MutService<Input = &'a I, Error = E>,
+        S2: MutService<Input = &'a I, Error = E>,
+    > MutService for RefForkService<I, S1, S2>
 {
+    type Input = &'a I;
     type Output = (S1::Output, S2::Output);
     type Error = E;
     fn process(&mut self, input: &'a I) -> Result<Self::Output, Self::Error> {
         Ok((self.first.process(input)?, self.second.process(input)?))
-    }
-}
-
-/// A [`Service`], which encapsulates an [`AsyncService`], using [`futures::executor::block_on`] to process it to completion, returning the underlying result synchronously.
-pub struct BlockingService<'a, I: Send + 'a, S: AsyncService<I>> {
-    service: S,
-    _phantom: PhantomData<fn(&'a I)>,
-}
-impl<'a, I: Send + 'a, S: AsyncService<I>> BlockingService<'a, I, S> {
-    pub fn new(service: S) -> Self {
-        Self {
-            service,
-            _phantom: PhantomData,
-        }
-    }
-}
-impl<'a, I: Send + 'a, S: AsyncService<I>> Service<I> for BlockingService<'a, I, S> {
-    type Output = S::Output;
-    type Error = S::Error;
-    fn process(&self, input: I) -> Result<Self::Output, Self::Error> {
-        futures::executor::block_on(self.service.process(input))
     }
 }
 
@@ -559,11 +579,12 @@ where
         }
     }
 }
-impl<O, E, S, F> Service<()> for PollService<E, S, F>
+impl<O, E, S, F> Service for PollService<E, S, F>
 where
-    S: Service<(), Output = Option<O>, Error = E>,
+    S: Service<Input = (), Output = Option<O>, Error = E>,
     F: Fn(usize) -> Result<(), RetryError<E>>,
 {
+    type Input = ();
     type Output = O;
     type Error = RetryError<S::Error>;
     fn process(&self, _: ()) -> Result<Self::Output, Self::Error> {
@@ -582,11 +603,13 @@ where
         }
     }
 }
-impl<O, E, S, F> MutService<()> for PollService<E, S, F>
+
+impl<O, E, S, F> MutService for PollService<E, S, F>
 where
-    S: MutService<(), Output = Option<O>, Error = E>,
+    S: MutService<Input = (), Output = Option<O>, Error = E>,
     F: Fn(usize) -> Result<(), RetryError<E>>,
 {
+    type Input = ();
     type Output = O;
     type Error = RetryError<S::Error>;
     fn process(&mut self, _: ()) -> Result<Self::Output, Self::Error> {
@@ -606,11 +629,14 @@ where
     }
 }
 #[async_trait]
-impl<O, E, S, F> AsyncService<()> for PollService<E, S, F>
+impl<O, E, S, F> AsyncService for PollService<E, S, F>
 where
-    S: AsyncService<(), Output = Option<O>, Error = E> + Send + Sync,
+    O: Send + 'static,
+    E: Send + 'static,
+    S: AsyncService<Input = (), Output = Option<O>, Error = E> + Send + Sync,
     F: Fn(usize) -> Result<(), RetryError<E>> + Send + Sync,
 {
+    type Input = ();
     type Output = O;
     type Error = RetryError<S::Error>;
     async fn process(&self, _: ()) -> Result<Self::Output, Self::Error> {
@@ -643,59 +669,30 @@ pub trait Retryable<I, E> {
 /// Between retries, the given `idle` function is called, given the attempt number as input, until `Ok(Output)` is returned by the underlying `Service` or `Err` is returned by the `Retryable` or `idle` function.
 ///
 /// See the [`idle`] module for some provided idle functions.
-pub struct RetryService<I, E, S, F>
+pub struct RetryService<E, S, F>
 where
     F: Fn(usize) -> Result<(), RetryError<E>>,
 {
     service: S,
     idle: F,
-    _phantom: PhantomData<fn(I, E)>,
 }
-impl<I, E, S, F> RetryService<I, E, S, F>
+impl<E, S, F> RetryService<E, S, F>
 where
     F: Fn(usize) -> Result<(), RetryError<E>>,
 {
     pub fn new(service: S, idle: F) -> Self {
-        Self {
-            service,
-            idle,
-            _phantom: PhantomData,
-        }
+        Self { service, idle }
     }
 }
-impl<I, E, S, F> Service<I> for RetryService<I, E, S, F>
+impl<S, F> Service for RetryService<S::Error, S, F>
 where
-    S: Service<I, Error = E> + Retryable<I, E>,
-    F: Fn(usize) -> Result<(), RetryError<E>>,
+    S: Service + Retryable<S::Input, S::Error>,
+    F: Fn(usize) -> Result<(), RetryError<S::Error>>,
 {
+    type Input = S::Input;
     type Output = S::Output;
     type Error = RetryError<S::Error>;
-    fn process(&self, input: I) -> Result<Self::Output, Self::Error> {
-        let mut input = input;
-        let mut attempt = 0;
-        loop {
-            match self.service.process(input) {
-                Ok(v) => return Ok(v),
-                Err(err) => match (self.idle)(attempt) {
-                    Ok(()) => match self.service.parse_retry(err) {
-                        Ok(v) => input = v,
-                        Err(err) => return Err(err),
-                    },
-                    Err(err) => return Err(err),
-                },
-            }
-            attempt += 1;
-        }
-    }
-}
-impl<I, E, S, F> MutService<I> for RetryService<I, E, S, F>
-where
-    S: MutService<I, Error = E> + Retryable<I, E>,
-    F: Fn(usize) -> Result<(), RetryError<E>>,
-{
-    type Output = S::Output;
-    type Error = RetryError<S::Error>;
-    fn process(&mut self, input: I) -> Result<Self::Output, Self::Error> {
+    fn process(&self, input: Self::Input) -> Result<Self::Output, Self::Error> {
         let mut input = input;
         let mut attempt = 0;
         loop {
@@ -714,15 +711,15 @@ where
     }
 }
 #[async_trait]
-impl<I, E, S, F> AsyncService<I> for RetryService<I, E, S, F>
+impl<S, F> AsyncService for RetryService<S::Error, S, F>
 where
-    S: AsyncService<I, Error = E> + Retryable<I, E> + Send + Sync,
-    I: Send + 'static,
-    F: Fn(usize) -> Result<(), RetryError<E>> + Send + Sync,
+    S: AsyncService + Retryable<S::Input, S::Error> + Send + Sync,
+    F: Fn(usize) -> Result<(), RetryError<S::Error>> + Send + Sync,
 {
+    type Input = S::Input;
     type Output = S::Output;
     type Error = RetryError<S::Error>;
-    async fn process(&self, input: I) -> Result<Self::Output, Self::Error> {
+    async fn process(&self, input: Self::Input) -> Result<Self::Output, Self::Error> {
         let mut input = input;
         let mut attempt = 0;
         loop {
@@ -744,25 +741,22 @@ where
 /// A [`Service`], which encapsulates a [`Retryable`], producing `None` when a retryable event is encounterd.
 ///
 /// This may be used to drive non-blocking duty-cycles in a service chain, continuously passing None through the service chain when no input is available.
-pub struct RetryToOptionService<I, E, S> {
+pub struct RetryToOptionService<S> {
     service: S,
-    _phantom: PhantomData<fn(I, E)>,
 }
-impl<I, E, S> RetryToOptionService<I, E, S> {
+impl<S> RetryToOptionService<S> {
     pub fn new(service: S) -> Self {
-        Self {
-            service,
-            _phantom: PhantomData,
-        }
+        Self { service }
     }
 }
-impl<I, E, S> Service<I> for RetryToOptionService<I, E, S>
+impl<S> Service for RetryToOptionService<S>
 where
-    S: Service<I, Error = E> + Retryable<I, E>,
+    S: Service + Retryable<S::Input, S::Error>,
 {
+    type Input = S::Input;
     type Output = Option<S::Output>;
     type Error = RetryError<S::Error>;
-    fn process(&self, input: I) -> Result<Self::Output, Self::Error> {
+    fn process(&self, input: Self::Input) -> Result<Self::Output, Self::Error> {
         match self.service.process(input) {
             Ok(v) => Ok(Some(v)),
             Err(err) => match self.service.parse_retry(err) {
@@ -813,28 +807,26 @@ impl<T: Clone, B: Borrow<T>> CloneService<T, B> {
         }
     }
 }
-impl<T: Clone, B: Borrow<T>> Service<B> for CloneService<T, B> {
+impl<T: Clone, B: Borrow<T>> Service for CloneService<T, B> {
+    type Input = B;
     type Output = T;
-    type Error = ();
+    type Error = Infallible;
     fn process(&self, input: B) -> Result<Self::Output, Self::Error> {
         Ok(input.borrow().clone())
     }
 }
 
-/// Iterate over [`Vec<T>`] input, passing each `T` to an underlying [`Service<T>`], returning `Vec<Output>`.
-pub struct IntoIterService<T, S: Service<T>> {
+/// Iterate over [`Vec<T>`] input, passing each `T` to an underlying [`Service`], returning `Vec<Output>`.
+pub struct IntoIterService<S: Service> {
     service: S,
-    _phantom: PhantomData<fn(T)>,
 }
-impl<T, S: Service<T>> IntoIterService<T, S> {
+impl<S: Service> IntoIterService<S> {
     pub fn new(service: S) -> Self {
-        Self {
-            service,
-            _phantom: PhantomData,
-        }
+        Self { service }
     }
 }
-impl<T, S: Service<T>> Service<Vec<T>> for IntoIterService<T, S> {
+impl<T, S: Service<Input = T>> Service for IntoIterService<S> {
+    type Input = Vec<T>;
     type Output = Vec<S::Output>;
     type Error = S::Error;
     fn process(&self, input: Vec<T>) -> Result<Self::Output, Self::Error> {
@@ -846,23 +838,21 @@ impl<T, S: Service<T>> Service<Vec<T>> for IntoIterService<T, S> {
     }
 }
 
-/// A [`Service<Option<T>>`] that encapsulates a `S: Service<T>`], producing `Option<S::Output>` as output.
+/// A [`Service`] that processes a [`Option<T>`] as input, processing with an underlying [`Service<Input = T>`]
+/// when the input is [`Some`], producing [`Option<S::Output>`] as output.
 ///
 /// When `None` is passed as input, `None` will be produced as output.
 /// When `Some(T)` is passed as input, `Some(S::Output)` will be produced as output.
-pub struct MaybeUnwrapService<T, S: Service<T>> {
+pub struct MaybeProcessService<S: Service> {
     service: S,
-    _phantom: PhantomData<fn(T)>,
 }
-impl<T, S: Service<T>> MaybeUnwrapService<T, S> {
+impl<S: Service> MaybeProcessService<S> {
     pub fn new(service: S) -> Self {
-        Self {
-            service,
-            _phantom: PhantomData,
-        }
+        Self { service }
     }
 }
-impl<T, S: Service<T>> Service<Option<T>> for MaybeUnwrapService<T, S> {
+impl<T, S: Service<Input = T>> Service for MaybeProcessService<S> {
+    type Input = Option<T>;
     type Output = Option<S::Output>;
     type Error = S::Error;
     fn process(&self, input: Option<T>) -> Result<Self::Output, Self::Error> {
@@ -874,30 +864,40 @@ impl<T, S: Service<T>> Service<Option<T>> for MaybeUnwrapService<T, S> {
 }
 
 /// A [`Service`] that accepts a `FnOnce()` as input, which is passed to [`spawn()`], and produces a [`JoinHandle`] as output.
-pub struct SpawnService {}
-impl SpawnService {
+pub struct SpawnService<F> {
+    _phantom: PhantomData<fn(F)>,
+}
+impl<F> SpawnService<F> {
     pub fn new() -> Self {
-        Self {}
+        Self {
+            _phantom: PhantomData,
+        }
     }
 }
-impl<T: Send + 'static, F: FnOnce() -> T + Send + 'static> Service<F> for SpawnService {
+impl<T: Send + 'static, F: FnOnce() -> T + Send + 'static> Service for SpawnService<F> {
+    type Input = F;
     type Output = JoinHandle<T>;
-    type Error = ();
+    type Error = Infallible;
     fn process(&self, input: F) -> Result<Self::Output, Self::Error> {
         Ok(spawn(input))
     }
 }
 
 /// A [`Service`] that will return `Ok(Input)` when the provided function returns true, or  or `Err(Stopped)` when the provided function returns false.
-pub struct StopService<KeepRunningFunc: Fn() -> bool> {
+pub struct StopService<I, KeepRunningFunc: Fn() -> bool> {
     f: KeepRunningFunc,
+    _phantom: PhantomData<fn(I)>,
 }
-impl<KeepRunningFunc: Fn() -> bool> StopService<KeepRunningFunc> {
+impl<I, KeepRunningFunc: Fn() -> bool> StopService<I, KeepRunningFunc> {
     pub fn new(f: KeepRunningFunc) -> Self {
-        Self { f }
+        Self {
+            f,
+            _phantom: PhantomData,
+        }
     }
 }
-impl<I, KeepRunningFunc: Fn() -> bool> Service<I> for StopService<KeepRunningFunc> {
+impl<I, KeepRunningFunc: Fn() -> bool> Service for StopService<I, KeepRunningFunc> {
+    type Input = I;
     type Output = I;
     type Error = Stopped;
     fn process(&self, input: I) -> Result<Self::Output, Self::Error> {
@@ -921,9 +921,9 @@ impl Error for Stopped {}
 /// A chain of [`Service`], [`MutService`], or [`AsyncService`] implementations, which is itself a single [`Service`], [`MutService`], or [`AsyncService`] that accepts the first service in the chain's input and produces the the last service in the chain's output.
 /// When any service in the chain returns an `Err`, the chain will break early, encapsulate the error in a `ServiceChainError`, and return `Err(ServiceChainError)` immediately.
 ///
-/// `ServiceChain::start(Service)` will start a service chain of [`Service`]s.
-/// `ServiceChain::start_mut(Service)` will start a service chain of [`MutService`]s, using [`IntoMutService`] to chain together the services.
-/// `ServiceChain::start_async(Service)` will start a service chain of [`AsyncService`]s, using [`IntoAsyncService`] to chain together the services.
+/// `ServiceChain::start(Service)` will start a service chain of [`Service`] impls.
+/// `ServiceChain::start_mut(Service)` will start a service chain of [`MutService`] impls.
+/// `ServiceChain::start_async(Service)` will start a service chain of [`AsyncService`] impls.
 ///
 /// Example of a series of `AddService`s chained together to produce a final result.
 /// ```
@@ -937,7 +937,8 @@ impl Error for Stopped {}
 ///         Self { n }
 ///     }
 /// }
-/// impl Service<usize> for AddService {
+/// impl Service for AddService {
+///     type Input = usize;
 ///     type Output = usize;
 ///     type Error = ();
 ///     fn process(&self, input: usize) -> Result<usize, ()> {
@@ -952,40 +953,40 @@ impl Error for Stopped {}
 /// let result = chain.process(100).unwrap();
 /// assert_eq!(107, result);
 /// ```
-pub struct ServiceChain<I, P, S> {
+pub struct ServiceChain<P, S> {
     prev: P,
     service: S,
-    _phantom: PhantomData<fn(I)>,
 }
-impl<'a, I, S: Service<I>> ServiceChain<I, NoOpService<'a>, S> {
+impl<'a, S: Service> ServiceChain<NoOpService<'a, S::Input>, S> {
     /// Start a new service chain using the given [`Service`] as the first service in the chain.
     /// This will return a [`ServiceChainBuilder`] that will allow you to link more [`Service`]s to finish building the [`ServiceChain`].
-    pub fn start(service: S) -> ServiceChainBuilder<I, NoOpService<'a>, S> {
+    pub fn start(service: S) -> ServiceChainBuilder<NoOpService<'a, S::Input>, S> {
         ServiceChainBuilder::start(service)
     }
 }
-impl<'a, I, S: MutService<I>> ServiceChain<I, NoOpService<'a>, S> {
+impl<'a, S: MutService> ServiceChain<NoOpService<'a, S::Input>, S> {
     /// Start a new mutable service chain using the given [`MutService`] as the first service in the chain.
     /// This will return a [`ServiceChainBuilder`] that will allow you to link more [`MutService`]s to finish building the [`ServiceChain`].
-    pub fn start_mut(service: S) -> MutServiceChainBuilder<I, NoOpService<'a>, S> {
+    pub fn start_mut(service: S) -> MutServiceChainBuilder<NoOpService<'a, S::Input>, S> {
         MutServiceChainBuilder::start(service)
     }
 }
-impl<'a, I: Send + 'a, S: AsyncService<I>> ServiceChain<I, NoOpService<'a>, S> {
+impl<'a, S: AsyncService> ServiceChain<NoOpService<'a, S::Input>, S> {
     /// Start a new async service chain using the given [`AsyncService`] as the first service in the chain.
     /// This will return a [`ServiceChainBuilder`] that will allow you to link more [`AsyncService`]s to finish building the [`ServiceChain`].
-    pub fn start_async(service: S) -> AsyncServiceChainBuilder<I, NoOpService<'a>, S> {
+    pub fn start_async(service: S) -> AsyncServiceChainBuilder<NoOpService<'a, S::Input>, S> {
         AsyncServiceChainBuilder::start(service)
     }
 }
-impl<I, P: Service<I>, S: Service<P::Output>> Service<I> for ServiceChain<I, P, S>
+impl<P: Service, S: Service<Input = P::Output>> Service for ServiceChain<P, S>
 where
-    <P as Service<I>>::Error: Debug + 'static,
-    <S as Service<P::Output>>::Error: Debug + 'static,
+    P::Error: Debug + 'static,
+    S::Error: Debug + 'static,
 {
+    type Input = P::Input;
     type Output = S::Output;
     type Error = ServiceChainError<Box<dyn Debug>>;
-    fn process(&self, input: I) -> Result<Self::Output, Self::Error> {
+    fn process(&self, input: Self::Input) -> Result<Self::Output, Self::Error> {
         let input = match self.prev.process(input) {
             Ok(o) => o,
             Err(e) => return Err(ServiceChainError::new(Box::new(e))),
@@ -997,14 +998,15 @@ where
         Ok(output)
     }
 }
-impl<I, P: MutService<I>, S: MutService<P::Output>> MutService<I> for ServiceChain<I, P, S>
+impl<P: MutService, S: MutService<Input = P::Output>> MutService for ServiceChain<P, S>
 where
-    <P as MutService<I>>::Error: Debug + 'static,
-    <S as MutService<P::Output>>::Error: Debug + 'static,
+    P::Error: Debug + 'static,
+    S::Error: Debug + 'static,
 {
+    type Input = P::Input;
     type Output = S::Output;
     type Error = ServiceChainError<Box<dyn Debug>>;
-    fn process(&mut self, input: I) -> Result<Self::Output, Self::Error> {
+    fn process(&mut self, input: Self::Input) -> Result<Self::Output, Self::Error> {
         let input = match self.prev.process(input) {
             Ok(o) => o,
             Err(e) => return Err(ServiceChainError::new(Box::new(e))),
@@ -1017,17 +1019,18 @@ where
     }
 }
 #[async_trait]
-impl<I: Send, P: AsyncService<I> + Send + Sync, S: AsyncService<P::Output> + Send + Sync>
-    AsyncService<I> for ServiceChain<I, P, S>
+impl<P: AsyncService + Send + Sync, S: AsyncService<Input = P::Output> + Send + Sync> AsyncService
+    for ServiceChain<P, S>
 where
-    <P as AsyncService<I>>::Error: Debug + Send + 'static,
-    <S as AsyncService<P::Output>>::Error: Debug + Send + 'static,
-    <P as AsyncService<I>>::Output: Send,
-    <S as AsyncService<P::Output>>::Output: Send,
+    P::Error: Debug + Send + 'static,
+    S::Error: Debug + Send + 'static,
+    P::Output: Send,
+    S::Output: Send,
 {
+    type Input = P::Input;
     type Output = S::Output;
     type Error = ServiceChainError<Box<dyn Debug + Send>>;
-    async fn process(&self, input: I) -> Result<Self::Output, Self::Error> {
+    async fn process(&self, input: Self::Input) -> Result<Self::Output, Self::Error> {
         let input = match self.prev.process(input).await {
             Ok(o) => o,
             Err(e) => return Err(ServiceChainError::new(Box::new(e))),
@@ -1066,261 +1069,231 @@ impl<C: Debug> Display for ServiceChainError<C> {
 /// Returned by `ServiceChain::start` to build a sync service chain.
 /// Use the `next(self, Service)` function to append more services to the [`ServiceChain`].
 /// Use the `end(self)` function to finish building and return the resulting [`ServiceChain`].
-pub struct ServiceChainBuilder<I, P: Service<I>, S: Service<P::Output>> {
-    chain: ServiceChain<I, P, S>,
+pub struct ServiceChainBuilder<P: Service, S: Service<Input = P::Output>> {
+    chain: ServiceChain<P, S>,
 }
-impl<'a, I, S: Service<I>> ServiceChainBuilder<I, NoOpService<'a>, S> {
+impl<'a, S: Service> ServiceChainBuilder<NoOpService<'a, S::Input>, S> {
     /// from ServiceChain::start()
-    fn start(service: S) -> ServiceChainBuilder<I, NoOpService<'a>, S> {
+    fn start(service: S) -> ServiceChainBuilder<NoOpService<'a, S::Input>, S> {
         ServiceChainBuilder {
             chain: ServiceChain {
                 prev: NoOpService::new(),
                 service,
-                _phantom: PhantomData,
             },
         }
     }
 }
-impl<I, P: Service<I>, S: Service<P::Output>> ServiceChainBuilder<I, P, S>
+impl<P: Service, S: Service<Input = P::Output>> ServiceChainBuilder<P, S>
 where
-    <P as Service<I>>::Error: Debug,
-    <S as Service<P::Output>>::Error: Debug,
+    P::Error: Debug,
+    S::Error: Debug,
 {
     /// Append another [`Service`] to the end of the service chain.
-    pub fn next<NS: Service<S::Output>>(
+    pub fn next<NS: Service<Input = S::Output>>(
         self,
         service: NS,
-    ) -> ServiceChainBuilder<I, ServiceChain<I, P, S>, NS> {
+    ) -> ServiceChainBuilder<ServiceChain<P, S>, NS> {
         ServiceChainBuilder {
             chain: ServiceChain {
                 prev: self.chain,
                 service,
-                _phantom: PhantomData,
             },
         }
     }
 }
-impl<I, P: Service<I>, S: Service<P::Output>> ServiceChainBuilder<I, P, S>
+impl<P: Service, S: Service<Input = P::Output>> ServiceChainBuilder<P, S>
 where
-    <P as Service<I>>::Error: Debug,
-    <S as Service<P::Output>>::Error: Debug,
-    <S as Service<P::Output>>::Output: Clone,
-{
-    /// Fork the service chain to the given two services by cloning the input.
-    pub fn fork_clone<E, NS1: Service<S::Output, Error = E>, NS2: Service<S::Output, Error = E>>(
-        self,
-        first: NS1,
-        second: NS2,
-    ) -> ServiceChainBuilder<I, ServiceChain<I, P, S>, CloningForkService<S::Output, NS1, NS2>>
-    {
-        ServiceChainBuilder {
-            chain: ServiceChain {
-                prev: self.chain,
-                service: CloningForkService::new(first, second),
-                _phantom: PhantomData,
-            },
-        }
-    }
-}
-impl<'a, I: 'a, P: Service<I> + 'a, S: Service<P::Output> + 'a> ServiceChainBuilder<I, P, S>
-where
-    <P as Service<I>>::Error: Debug + 'static,
-    <S as Service<P::Output>>::Error: Debug + 'static,
-{
-    /// End and return the resulting [`ServiceChain`].
-    pub fn end(self) -> ServiceChain<I, P, S> {
-        self.chain
-    }
-    /// End and return the resulting [`ServiceChain`] as a [`DynService`].
-    /// A resulting [`ServiceChain`] is likely to have a complex compile-time type.
-    /// Wrapping in a [`DynService`] simplifies the type signature, making it easier to return or pass as an input into another function.
-    pub fn end_dyn(self) -> DynService<'a, I, S::Output, ServiceChainError<Box<dyn Debug>>> {
-        DynService::new(self.chain)
-    }
-}
-
-/// Returned by `ServiceChain::start_mut` to build a mut service chain.
-/// Use the `next(self, IntoMutService)` function to append more services to the [`ServiceChain`].
-/// Use the `end(self)` function to finish building and return the resulting [`ServiceChain`].
-pub struct MutServiceChainBuilder<I, P: MutService<I>, S: MutService<P::Output>> {
-    chain: ServiceChain<I, P, S>,
-}
-impl<'a, I, S: MutService<I>> MutServiceChainBuilder<I, NoOpService<'a>, S> {
-    /// from ServiceChain::start_mut()
-    fn start<T: IntoMutService<I, S>>(service: T) -> MutServiceChainBuilder<I, NoOpService<'a>, S> {
-        MutServiceChainBuilder {
-            chain: ServiceChain {
-                prev: NoOpService::new(),
-                service: service.into_mut(),
-                _phantom: PhantomData,
-            },
-        }
-    }
-}
-impl<I, P: MutService<I>, S: MutService<P::Output>> MutServiceChainBuilder<I, P, S>
-where
-    <P as MutService<I>>::Error: Debug,
-    <S as MutService<P::Output>>::Error: Debug,
-{
-    /// Append another [`MutService`] to the end of the service chain, using [`IntoMutService`] to accept either a [`Service`] or [`MutService`].
-    pub fn next<NS: MutService<S::Output>, T: IntoMutService<S::Output, NS>>(
-        self,
-        service: T,
-    ) -> MutServiceChainBuilder<I, ServiceChain<I, P, S>, NS> {
-        MutServiceChainBuilder {
-            chain: ServiceChain {
-                prev: self.chain,
-                service: service.into_mut(),
-                _phantom: PhantomData,
-            },
-        }
-    }
-}
-impl<I, P: MutService<I>, S: MutService<P::Output>> MutServiceChainBuilder<I, P, S>
-where
-    <P as MutService<I>>::Error: Debug,
-    <S as MutService<P::Output>>::Error: Debug,
-    <S as MutService<P::Output>>::Output: Clone,
+    P::Error: Debug,
+    S::Error: Debug,
+    S::Output: Clone,
 {
     /// Fork the service chain to the given two services by cloning the input.
     pub fn fork_clone<
         E,
-        NS1: MutService<S::Output, Error = E>,
-        NS2: MutService<S::Output, Error = E>,
+        NS1: Service<Input = S::Output, Error = E>,
+        NS2: Service<Input = S::Output, Error = E>,
     >(
         self,
         first: NS1,
         second: NS2,
-    ) -> MutServiceChainBuilder<I, ServiceChain<I, P, S>, CloningForkService<S::Output, NS1, NS2>>
-    {
+    ) -> ServiceChainBuilder<ServiceChain<P, S>, CloningForkService<NS1, NS2>> {
+        ServiceChainBuilder {
+            chain: ServiceChain {
+                prev: self.chain,
+                service: CloningForkService::new(first, second),
+            },
+        }
+    }
+}
+impl<'a, P: Service + 'a, S: Service<Input = P::Output> + 'a> ServiceChainBuilder<P, S>
+where
+    P::Error: Debug + 'static,
+    S::Error: Debug + 'static,
+{
+    /// End and return the resulting [`ServiceChain`].
+    pub fn end(self) -> ServiceChain<P, S> {
+        self.chain
+    }
+}
+
+/// Returned by `ServiceChain::start_mut` to build a mut service chain.
+/// Use the `next(self, MutService)` function to append more services to the [`ServiceChain`].
+/// Use the `end(self)` function to finish building and return the resulting [`ServiceChain`].
+pub struct MutServiceChainBuilder<P: MutService, S: MutService<Input = P::Output>> {
+    chain: ServiceChain<P, S>,
+}
+impl<'a, S: MutService> MutServiceChainBuilder<NoOpService<'a, S::Input>, S> {
+    /// from ServiceChain::start_mut()
+    fn start(service: S) -> MutServiceChainBuilder<NoOpService<'a, S::Input>, S> {
+        MutServiceChainBuilder {
+            chain: ServiceChain {
+                prev: NoOpService::new(),
+                service: service,
+            },
+        }
+    }
+}
+impl<P: MutService, S: MutService<Input = P::Output>> MutServiceChainBuilder<P, S>
+where
+    P::Error: Debug,
+    S::Error: Debug,
+{
+    /// Append another [`MutService`] to the end of the service chain
+    pub fn next<NS: MutService<Input = S::Output>>(
+        self,
+        service: NS,
+    ) -> MutServiceChainBuilder<ServiceChain<P, S>, NS> {
+        MutServiceChainBuilder {
+            chain: ServiceChain {
+                prev: self.chain,
+                service,
+            },
+        }
+    }
+}
+impl<P: MutService, S: MutService<Input = P::Output>> MutServiceChainBuilder<P, S>
+where
+    P::Error: Debug,
+    S::Error: Debug,
+    S::Output: Clone,
+{
+    /// Fork the service chain to the given two services by cloning the input.
+    pub fn fork_clone<
+        E,
+        NS1: MutService<Input = S::Output, Error = E>,
+        NS2: MutService<Input = S::Output, Error = E>,
+    >(
+        self,
+        first: NS1,
+        second: NS2,
+    ) -> MutServiceChainBuilder<ServiceChain<P, S>, CloningForkService<NS1, NS2>> {
         MutServiceChainBuilder {
             chain: ServiceChain {
                 prev: self.chain,
                 service: CloningForkService::new(first, second),
-                _phantom: PhantomData,
             },
         }
     }
 }
-impl<'a, I: 'a, P: MutService<I> + 'a, S: MutService<P::Output> + 'a>
-    MutServiceChainBuilder<I, P, S>
+impl<'a, P: MutService + 'a, S: MutService<Input = P::Output> + 'a> MutServiceChainBuilder<P, S>
 where
-    <P as MutService<I>>::Error: Debug + 'static,
-    <S as MutService<P::Output>>::Error: Debug + 'static,
+    P::Error: Debug + 'static,
+    S::Error: Debug + 'static,
 {
     /// End and return the resulting [`ServiceChain`].
-    pub fn end(self) -> ServiceChain<I, P, S> {
+    pub fn end(self) -> ServiceChain<P, S> {
         self.chain
-    }
-    /// End and return the resulting [`ServiceChain`] as a [`DynMutService`].
-    /// A resulting [`ServiceChain`] is likely to have a complex compile-time type.
-    /// Wrapping in a [`DynMutService`] simplifies the type signature, making it easier to return or pass as an input into another function.
-    pub fn end_dyn(self) -> DynMutService<'a, I, S::Output, ServiceChainError<Box<dyn Debug>>> {
-        DynMutService::new(self.chain)
     }
 }
 
 /// Returned by `ServiceChain::start_async` to build an async service chain.
-/// Use the `next(self, IntoAsyncService)` function to append more services to the [`ServiceChain`].
+/// Use the `next(self, AsyncService)` function to append more services to the [`ServiceChain`].
 /// Use the `end(self)` function to finish building and return the resulting [`ServiceChain`].
-pub struct AsyncServiceChainBuilder<I: Send, P: AsyncService<I>, S: AsyncService<P::Output>> {
-    chain: ServiceChain<I, P, S>,
+pub struct AsyncServiceChainBuilder<P: AsyncService, S: AsyncService<Input = P::Output>> {
+    chain: ServiceChain<P, S>,
 }
-impl<'a, I: Send, S: AsyncService<I>> AsyncServiceChainBuilder<I, NoOpService<'a>, S> {
+impl<'a, S: AsyncService> AsyncServiceChainBuilder<NoOpService<'a, S::Input>, S> {
     /// from ServiceChain::start_async()
-    fn start<T: IntoAsyncService<I, S>>(
-        service: T,
-    ) -> AsyncServiceChainBuilder<I, NoOpService<'a>, S> {
+    fn start(service: S) -> AsyncServiceChainBuilder<NoOpService<'a, S::Input>, S> {
         AsyncServiceChainBuilder {
             chain: ServiceChain {
                 prev: NoOpService::new(),
-                service: service.into_async(),
-                _phantom: PhantomData,
+                service,
             },
         }
     }
 }
-impl<I: Send, P: AsyncService<I> + Send + Sync, S: AsyncService<P::Output> + Send + Sync>
-    AsyncServiceChainBuilder<I, P, S>
+impl<P: AsyncService + Send + Sync, S: AsyncService<Input = P::Output> + Send + Sync>
+    AsyncServiceChainBuilder<P, S>
 where
-    <P as AsyncService<I>>::Error: Debug + Send,
-    <S as AsyncService<P::Output>>::Error: Debug + Send,
-    <P as AsyncService<I>>::Output: Send,
-    <S as AsyncService<P::Output>>::Output: Send,
+    P::Error: Debug + Send,
+    S::Error: Debug + Send,
+    P::Output: Send,
+    S::Output: Send,
 {
-    /// Append another [`AsyncService`] to the end of the service chain, using [`IntoAsyncService`] to accept either a [`Service`] or [`AsyncService`].
-    pub fn next<NS: AsyncService<S::Output>, T: IntoAsyncService<S::Output, NS>>(
+    /// Append another [`AsyncService`] to the end of the service chain.
+    pub fn next<NS: AsyncService<Input = S::Output>>(
         self,
-        service: T,
-    ) -> AsyncServiceChainBuilder<I, ServiceChain<I, P, S>, NS> {
+        service: NS,
+    ) -> AsyncServiceChainBuilder<ServiceChain<P, S>, NS> {
         AsyncServiceChainBuilder {
             chain: ServiceChain {
                 prev: self.chain,
-                service: service.into_async(),
-                _phantom: PhantomData,
+                service: service,
             },
         }
     }
 }
-impl<I: Send, P: AsyncService<I> + Send + Sync, S: AsyncService<P::Output> + Send + Sync>
-    AsyncServiceChainBuilder<I, P, S>
+impl<P: AsyncService + Send + Sync, S: AsyncService<Input = P::Output> + Send + Sync>
+    AsyncServiceChainBuilder<P, S>
 where
-    <P as AsyncService<I>>::Error: Debug + Send,
-    <S as AsyncService<P::Output>>::Error: Debug + Send,
-    <P as AsyncService<I>>::Output: Send,
-    <S as AsyncService<P::Output>>::Output: Send + Clone,
+    P::Error: Debug + Send,
+    S::Error: Debug + Send,
+    P::Output: Send,
+    S::Output: Send + Clone + Sync,
 {
     /// Fork the service chain to the given two services by cloning the input.
     pub fn fork_clone<
-        E: Debug + Send,
-        NS1: AsyncService<S::Output, Error = E> + Send + Sync,
-        NS2: AsyncService<S::Output, Error = E> + Send + Sync,
+        NS1: AsyncService<Input = S::Output> + Send + Sync,
+        NS2: AsyncService<Input = S::Output, Error = NS1::Error> + Send + Sync,
     >(
         self,
         first: NS1,
         second: NS2,
-    ) -> AsyncServiceChainBuilder<I, ServiceChain<I, P, S>, CloningForkService<S::Output, NS1, NS2>>
+    ) -> AsyncServiceChainBuilder<ServiceChain<P, S>, CloningForkService<NS1, NS2>>
     where
-        <NS1 as AsyncService<S::Output>>::Output: Send,
-        <NS2 as AsyncService<S::Output>>::Output: Send,
+        <NS1 as AsyncService>::Output: Send + Sync,
+        <NS2 as AsyncService>::Output: Send + Sync,
     {
         AsyncServiceChainBuilder {
             chain: ServiceChain {
                 prev: self.chain,
                 service: CloningForkService::new(first, second),
-                _phantom: PhantomData,
             },
         }
     }
 }
 impl<
         'a,
-        I: Send + 'a,
-        P: AsyncService<I> + Send + Sync + 'a,
-        S: AsyncService<P::Output> + Send + Sync + 'a,
-    > AsyncServiceChainBuilder<I, P, S>
+        P: AsyncService + Send + Sync + 'a,
+        S: AsyncService<Input = P::Output> + Send + Sync + 'a,
+    > AsyncServiceChainBuilder<P, S>
 where
-    <P as AsyncService<I>>::Error: Send + Debug + 'static,
-    <S as AsyncService<P::Output>>::Error: Send + Debug + 'static,
-    <P as AsyncService<I>>::Output: Send + 'a,
-    <S as AsyncService<P::Output>>::Output: Send + 'a,
+    P::Error: Send + Debug + 'static,
+    S::Error: Send + Debug + 'static,
+    P::Output: Send + 'a,
+    S::Output: Send + 'a,
 {
     /// End and return the resulting [`ServiceChain`].
-    pub fn end(self) -> ServiceChain<I, P, S> {
+    pub fn end(self) -> ServiceChain<P, S> {
         self.chain
-    }
-    /// End and return the resulting [`ServiceChain`] as a [`DynAsyncService`].
-    /// A resulting [`ServiceChain`] is likely to have a complex compile-time type.
-    /// Wrapping in a [`DynAsyncService`] simplifies the type signature, making it easier to return or pass as an input into another function.
-    pub fn end_dyn(
-        self,
-    ) -> DynAsyncService<'a, I, S::Output, ServiceChainError<Box<dyn Debug + Send>>> {
-        DynAsyncService::new(self.chain)
     }
 }
 
 #[cfg(test)]
 mod tests {
+    use futures::executor::block_on;
+
     use super::*;
 
     struct AddService {
@@ -1331,10 +1304,11 @@ mod tests {
             Self { n }
         }
     }
-    impl Service<usize> for AddService {
+    impl Service for AddService {
+        type Input = usize;
         type Output = usize;
-        type Error = ();
-        fn process(&self, input: usize) -> Result<usize, ()> {
+        type Error = Infallible;
+        fn process(&self, input: usize) -> Result<usize, Infallible> {
             Ok(input + self.n)
         }
     }
@@ -1347,10 +1321,11 @@ mod tests {
             Self { n: 0 }
         }
     }
-    impl MutService<usize> for AppendService {
+    impl MutService for AppendService {
+        type Input = usize;
         type Output = usize;
-        type Error = ();
-        fn process(&mut self, input: usize) -> Result<usize, ()> {
+        type Error = Infallible;
+        fn process(&mut self, input: usize) -> Result<usize, Infallible> {
             self.n += input;
             Ok(self.n)
         }
@@ -1381,8 +1356,7 @@ mod tests {
             .next(ServiceAsync::new(AddService::new(2)))
             .next(ServiceAsync::new(AddService::new(4)))
             .end();
-        let executor = BlockingService::new(chain);
-        let result = executor.process(100).unwrap();
+        let result = block_on(chain.process(100)).unwrap();
         assert_eq!(107, result);
     }
 }

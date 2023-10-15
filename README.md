@@ -26,7 +26,8 @@ impl AddService {
         Self { n }
     }
 }
-impl Service<usize> for AddService {
+impl Service for AddService {
+    type Input = usize;
     type Output = usize;
     type Error = ();
     fn process(&self, input: usize) -> Result<usize, ()> {

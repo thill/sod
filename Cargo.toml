@@ -1,6 +1,6 @@
 [package]
 name = "sod"
-version = "0.2.3"
+version = "0.3.1"
 edition = "2021"
 license = "MIT OR Apache-2.0"
 authors = ["Eric Thill"]
@@ -12,7 +12,7 @@ exclude = ["Cargo.lock"]
 
 [dependencies]
 async-trait = "0.1.64"
-futures = "0.3.26"
 
 [dev-dependencies]
 ctrlc = "3.2.5"
+futures = "0.3.28"

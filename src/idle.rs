@@ -1,9 +1,9 @@
-//! Idle functions for use by [`crate::RetryService`] and [`crate::PollService`].
+//! Idle functions that may optionally be used by [`crate::RetryService`] and [`crate::PollService`].
 //!
 //! Utility functions for common idle strategies.
 //! These idle strategies will all first check the static [`KEEP_RUNNING`] boolean, and will return `Err(RetryError::Interrupted)` when `KEEP_RUNNING` returns false.
 //!
-//! For an idle strategy with a good balance between performance and CPU-spinning, see [`backoff`].
+//! For an idle strategy with a good balance between performance and CPU usage, see [`backoff`].
 
 use crate::RetryError;
 use std::{
