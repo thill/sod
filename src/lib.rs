@@ -17,6 +17,7 @@ use std::{
     error::Error,
     fmt::{Debug, Display},
     marker::PhantomData,
+    rc::Rc,
     sync::{Arc, Mutex},
     thread::{spawn, JoinHandle},
 };
@@ -314,18 +315,20 @@ impl<'a, T: Send + 'static> AsyncService for NoOpService<'a, T> {
 
 /// A [`Service`], which encapsulates a [`MutService`], using [`std::cell::RefCell`] to aquire mutability in each call to `process`.
 ///
+/// You may obtain a shared reference of this service using `RefCellService::clone(&service)`.
+///
 /// This service is never `Sync`, but may be `Send` if the underlying [`Service`] is `Send`.
-pub struct RefCellService<S: Service> {
-    service: RefCell<S>,
+pub struct RefCellService<S: MutService> {
+    service: Rc<RefCell<S>>,
 }
-impl<S: Service> RefCellService<S> {
+impl<S: MutService> RefCellService<S> {
     pub fn new(service: S) -> Self {
         Self {
-            service: RefCell::new(service),
+            service: Rc::new(RefCell::new(service)),
         }
     }
 }
-impl<S: Service> Service for RefCellService<S> {
+impl<S: MutService> Service for RefCellService<S> {
     type Input = S::Input;
     type Output = S::Output;
     type Error = S::Error;
@@ -333,19 +336,28 @@ impl<S: Service> Service for RefCellService<S> {
         self.service.borrow_mut().process(input)
     }
 }
+impl<S: MutService> Clone for RefCellService<S> {
+    fn clone(&self) -> Self {
+        Self {
+            service: Rc::clone(&self.service),
+        }
+    }
+}
 
 /// A [`Service`], which encapsulates a [`MutService`], using [`std::sync::Mutex`] to aquire mutability in each call to `process`.
 ///
 /// This service both `Send` and `Sync`.
 ///
+/// You may obtain a shared reference of this service using `MutexService::clone(&service)`.
+///
 /// The service will panic if the mutex returns a poison error.
 pub struct MutexService<S> {
-    service: Mutex<S>,
+    service: Arc<Mutex<S>>,
 }
 impl<S> MutexService<S> {
     pub fn new(service: S) -> Self {
         Self {
-            service: Mutex::new(service),
+            service: Arc::new(Mutex::new(service)),
         }
     }
 }
@@ -355,6 +367,13 @@ impl<S: MutService> Service for MutexService<S> {
     type Error = S::Error;
     fn process(&self, input: Self::Input) -> Result<Self::Output, Self::Error> {
         self.service.lock().expect("poisoned mutex").process(input)
+    }
+}
+impl<S: MutService> Clone for MutexService<S> {
+    fn clone(&self) -> Self {
+        Self {
+            service: Arc::clone(&self.service),
+        }
     }
 }
 
