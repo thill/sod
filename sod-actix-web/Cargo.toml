@@ -1,0 +1,30 @@
+[package]
+name = "sod-actix-web"
+version = "0.3.1"
+edition = "2021"
+license = "MIT OR Apache-2.0"
+authors = ["Eric Thill"]
+repository = "https://github.com/thill/sod"
+description = "Service Oriented Design - Actix Web"
+keywords = ["service", "pattern"]
+categories = ["rust-patterns"]
+exclude = ["Cargo.lock"]
+
+[dependencies]
+sod = { workspace = true }
+actix = "0.13.0"
+actix-web = "4.3.1"
+actix-web-actors = "4.2.0"
+
+[dev-dependencies]
+serde = "1.0.175"
+serde_derive = "1.0.175"
+
+[[example]]
+name = "greet_server"
+
+[[example]]
+name = "math_server"
+
+[[example]]
+name = "ws_echo_server"

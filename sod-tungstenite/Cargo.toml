@@ -1,0 +1,18 @@
+[package]
+name = "sod-tungstenite"
+version = "0.3.3"
+edition = "2021"
+license = "MIT OR Apache-2.0"
+authors = ["Eric Thill"]
+repository = "https://github.com/thill/sod"
+description = "Service Oriented Design - Tungstenite"
+keywords = ["service", "pattern"]
+categories = ["rust-patterns"]
+exclude = ["Cargo.lock"]
+
+[dependencies]
+sod = { workspace = true }
+tungstenite = "0.20.1"
+
+[dev-dependencies]
+url = "2.3.1"

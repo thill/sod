@@ -1,18 +1,8 @@
-[package]
-name = "sod"
-version = "0.3.2"
-edition = "2021"
-license = "MIT OR Apache-2.0"
-authors = ["Eric Thill"]
-repository = "https://github.com/thill/sod"
-description = "Service Oriented Design"
-keywords = ["service", "pattern"]
-categories = ["rust-patterns"]
-exclude = ["Cargo.lock"]
+[workspace]
+members = ['sod', 'sod-actix-web', 'sod-bus', 'sod-crossbeam', 'sod-log', 'sod-mpsc', 'sod-tungstenite']
+resolver = "2"
+package.version = "0.3.2"
+package.edition = "2021"
 
-[dependencies]
-async-trait = "0.1.64"
-
-[dev-dependencies]
-ctrlc = "3.2.5"
-futures = "0.3.28"
+[workspace.dependencies]
+sod = { path = "sod" }
