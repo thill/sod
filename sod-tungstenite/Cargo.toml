@@ -11,7 +11,7 @@ categories = ["rust-patterns"]
 exclude = ["Cargo.lock"]
 
 [dependencies]
-sod = { workspace = true }
+sod = "0.3.3"
 tungstenite = "0.20.1"
 
 [dev-dependencies]
