@@ -1,7 +1,7 @@
 [workspace]
 members = ['sod', 'sod-actix-web', 'sod-bus', 'sod-crossbeam', 'sod-log', 'sod-mpsc', 'sod-tungstenite']
 resolver = "2"
-package.version = "0.3.4"
+package.version = "0.4.1"
 package.edition = "2021"
 
 [workspace.dependencies]

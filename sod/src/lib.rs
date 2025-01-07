@@ -1104,8 +1104,8 @@ impl<'a, S: Service> ServiceChainBuilder<NoOpService<'a, S::Input>, S> {
 }
 impl<P: Service, S: Service<Input = P::Output>> ServiceChainBuilder<P, S>
 where
-    P::Error: Debug,
-    S::Error: Debug,
+    P::Error: Debug + 'static,
+    S::Error: Debug + 'static,
 {
     /// Append another [`Service`] to the end of the service chain.
     pub fn next<NS: Service<Input = S::Output>>(
@@ -1122,8 +1122,8 @@ where
 }
 impl<P: Service, S: Service<Input = P::Output>> ServiceChainBuilder<P, S>
 where
-    P::Error: Debug,
-    S::Error: Debug,
+    P::Error: Debug + 'static,
+    S::Error: Debug + 'static,
     S::Output: Clone,
 {
     /// Fork the service chain to the given two services by cloning the input.
@@ -1174,8 +1174,8 @@ impl<'a, S: MutService> MutServiceChainBuilder<NoOpService<'a, S::Input>, S> {
 }
 impl<P: MutService, S: MutService<Input = P::Output>> MutServiceChainBuilder<P, S>
 where
-    P::Error: Debug,
-    S::Error: Debug,
+    P::Error: Debug + 'static,
+    S::Error: Debug + 'static,
 {
     /// Append another [`MutService`] to the end of the service chain
     pub fn next<NS: MutService<Input = S::Output>>(
@@ -1192,8 +1192,8 @@ where
 }
 impl<P: MutService, S: MutService<Input = P::Output>> MutServiceChainBuilder<P, S>
 where
-    P::Error: Debug,
-    S::Error: Debug,
+    P::Error: Debug + 'static,
+    S::Error: Debug + 'static,
     S::Output: Clone,
 {
     /// Fork the service chain to the given two services by cloning the input.
