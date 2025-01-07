@@ -1,6 +1,6 @@
 [package]
 name = "sod-log"
-version = "0.4.1"
+version = "0.4.2"
 edition = "2021"
 license = "MIT OR Apache-2.0"
 authors = ["Eric Thill"]
@@ -11,5 +11,5 @@ categories = ["rust-patterns"]
 exclude = ["Cargo.lock"]
 
 [dependencies]
-sod = "0.3.3"
-log = "0.4.17"
+sod = "0.4.2"
+log = "0.4.27"
